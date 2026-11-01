@@ -18,5 +18,11 @@ export type ToolStatus = (typeof TOOL_STATUSES)[number];
 export const USER_ROLES = ["user", "admin"] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
+export const REQUEST_STATUSES = ["pending", "approved", "declined"] as const;
+export type RequestStatus = (typeof REQUEST_STATUSES)[number];
+
+export const DEFAULT_TIMEZONE = "Africa/Addis_Ababa";
+export const MAX_BORROW_DAYS = 30;
+
 export const MAX_NAME_LENGTH = 100;
 export const MAX_DESCRIPTION_LENGTH = 500;

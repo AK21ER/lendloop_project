@@ -23,6 +23,7 @@ export class MockConvexDb {
   constructor() {
     this.tables.set("users", new Map());
     this.tables.set("tools", new Map());
+    this.tables.set("borrowRequests", new Map());
   }
 
   async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -79,6 +80,33 @@ export class MockConvexDb {
         ...d,
       }));
 
+    const createQueryChain = (docs: GenericDocument[]) => {
+      const current = [...docs];
+      return {
+        order(direction: "asc" | "desc") {
+          if (direction === "desc") {
+            current.reverse();
+          }
+          return this;
+        },
+        async unique() {
+          if (current.length > 1) {
+            throw new Error("Multiple documents found when unique was expected");
+          }
+          return current[0] ?? null;
+        },
+        async first() {
+          return current[0] ?? null;
+        },
+        async collect() {
+          return [...current];
+        },
+        async take(n: number) {
+          return current.slice(0, n);
+        },
+      };
+    };
+
     return {
       withIndex(
         indexName: string,
@@ -103,39 +131,9 @@ export class MockConvexDb {
           });
         }
 
-        return {
-          async unique() {
-            if (filtered.length > 1) {
-              throw new Error(
-                `Multiple documents found when unique was expected for index ${indexName}`
-              );
-            }
-            return filtered[0] ?? null;
-          },
-          async first() {
-            return filtered[0] ?? null;
-          },
-          async collect() {
-            return [...filtered];
-          },
-          async take(n: number) {
-            return filtered.slice(0, n);
-          },
-        };
+        return createQueryChain(filtered);
       },
-      async collect() {
-        return getDocs();
-      },
-      async take(n: number) {
-        return getDocs().slice(0, n);
-      },
-      async unique() {
-        const docs = getDocs();
-        if (docs.length > 1) {
-          throw new Error("Multiple documents found when unique was expected");
-        }
-        return docs[0] ?? null;
-      },
+      ...createQueryChain(getDocs()),
     };
   }
 }

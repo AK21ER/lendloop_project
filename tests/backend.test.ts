@@ -10,6 +10,7 @@ import {
 
 import * as usersModule from "../convex/users";
 import * as toolsModule from "../convex/tools";
+import * as requestsModule from "../convex/requests";
 import * as authTestModule from "../convex/authTest";
 import { requireAdmin, requireToolOwner } from "../convex/lib/permissions";
 import { requireAuthenticatedUser } from "../convex/lib/auth";
@@ -452,3 +453,484 @@ describe("LendLoop Phase 3.1: Users & Tool Listings Backend", () => {
     );
   });
 });
+
+function getOffsetDate(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Addis_Ababa",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return formatter.format(d);
+}
+
+describe("LendLoop Phase 3.2: Borrow Request Backend", () => {
+  // Setup helper for lender, borrower, and active tool
+  async function setupLenderAndTool(db: MockConvexDb) {
+    const lenderCtx = createMockContext(db, {
+      subject: "clerk_lender",
+      name: "Larry Lender",
+    });
+    const lender = (await callMutation(usersModule.ensureCurrentUser, lenderCtx, {})) as {
+      _id: string;
+    };
+
+    const toolId = (await callMutation(toolsModule.create, lenderCtx, {
+      name: "DeWalt Miter Saw",
+      category: "Power Tools",
+      condition: "good",
+      description: "12-inch compound miter saw",
+    })) as string;
+
+    return { lenderCtx, lender, toolId };
+  }
+
+  // 1. Authenticated user can request another user's active tool
+  it("Requirement 1: Authenticated user can request another user's active tool", async () => {
+    const db = new MockConvexDb();
+    const { toolId, lender } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, {
+      subject: "clerk_borrower",
+      name: "Brenda Borrower",
+    });
+    const borrower = (await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {})) as {
+      _id: string;
+    };
+
+    const startDate = getOffsetDate(1);
+    const endDate = getOffsetDate(3);
+
+    const requestId = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate,
+      endDate,
+    })) as string;
+
+    assert.ok(requestId);
+    const request = (await db.get(requestId))!;
+    assert.equal(request.toolId, toolId);
+    assert.equal(request.borrowerId, borrower._id);
+    assert.equal(request.lenderId, lender._id);
+    assert.equal(request.startDate, startDate);
+    assert.equal(request.endDate, endDate);
+    assert.equal(request.status, "pending");
+  });
+
+  // 2. Unauthenticated request creation is rejected
+  it("Requirement 2: Unauthenticated request creation is rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+    const unauthCtx = createMockContext(db, null);
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, unauthCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(1),
+          endDate: getOffsetDate(3),
+        });
+      },
+      {
+        message: /Unauthenticated/i,
+      }
+    );
+  });
+
+  // 3. User cannot request their own tool
+  it("Requirement 3: User cannot request to borrow their own tool", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId } = await setupLenderAndTool(db);
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, lenderCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(1),
+          endDate: getOffsetDate(2),
+        });
+      },
+      {
+        message: /Cannot request to borrow your own tool/i,
+      }
+    );
+  });
+
+  // 4. Inactive listing cannot be requested
+  it("Requirement 4: Inactive listing cannot be requested", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId } = await setupLenderAndTool(db);
+
+    // Set tool status to inactive
+    await callMutation(toolsModule.update, lenderCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      status: "inactive",
+    });
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(1),
+          endDate: getOffsetDate(2),
+        });
+      },
+      {
+        message: /inactive/i,
+      }
+    );
+  });
+
+  // 5. Removed listing cannot be requested
+  it("Requirement 5: Removed listing cannot be requested", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId } = await setupLenderAndTool(db);
+
+    // Remove tool
+    await callMutation(toolsModule.removeMine, lenderCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    });
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(1),
+          endDate: getOffsetDate(2),
+        });
+      },
+      {
+        message: /removed/i,
+      }
+    );
+  });
+
+  // 6. Invalid date format is rejected
+  it("Requirement 6: Invalid date format is rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: "2026/12/01",
+          endDate: "2026-12-05",
+        });
+      },
+      {
+        message: /invalid/i,
+      }
+    );
+  });
+
+  // 7. Invalid calendar dates are rejected
+  it("Requirement 7: Invalid calendar dates are rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    // Feb 30th does not exist
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: "2027-02-30",
+          endDate: "2027-03-02",
+        });
+      },
+      {
+        message: /not a valid calendar date/i,
+      }
+    );
+  });
+
+  // 8. End date before start date is rejected
+  it("Requirement 8: End date before start date is rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(5),
+          endDate: getOffsetDate(2),
+        });
+      },
+      {
+        message: /earlier than start date/i,
+      }
+    );
+  });
+
+  // 9. Past date range is rejected
+  it("Requirement 9: Past date range is rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: "2020-01-01",
+          endDate: "2020-01-05",
+        });
+      },
+      {
+        message: /cannot be in the past/i,
+      }
+    );
+  });
+
+  // 10. Duplicate equivalent pending requests are rejected
+  it("Requirement 10: Duplicate equivalent pending requests by the same borrower are rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    const startDate = getOffsetDate(2);
+    const endDate = getOffsetDate(4);
+
+    // First request succeeds
+    await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate,
+      endDate,
+    });
+
+    // Duplicate request fails
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate,
+          endDate,
+        });
+      },
+      {
+        message: /pending request for this tool with the same date range already exists/i,
+      }
+    );
+  });
+
+  // 11. Two different borrowers can submit pending requests for the same period
+  it("Requirement 11: Two different borrowers can submit pending requests for the same period", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const b1Ctx = createMockContext(db, { subject: "clerk_b1", name: "Borrower 1" });
+    await callMutation(usersModule.ensureCurrentUser, b1Ctx, {});
+
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+
+    const startDate = getOffsetDate(2);
+    const endDate = getOffsetDate(4);
+
+    const req1 = await callMutation(requestsModule.create, b1Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate,
+      endDate,
+    });
+
+    const req2 = await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate,
+      endDate,
+    });
+
+    assert.ok(req1);
+    assert.ok(req2);
+    assert.notEqual(req1, req2);
+  });
+
+  // 12. Borrower sees only their own requests in listMine
+  it("Requirement 12: Borrower sees only their own requests in listMine", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const b1Ctx = createMockContext(db, { subject: "clerk_b1", name: "Borrower 1" });
+    await callMutation(usersModule.ensureCurrentUser, b1Ctx, {});
+
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+
+    await callMutation(requestsModule.create, b1Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(1),
+      endDate: getOffsetDate(2),
+    });
+
+    await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(3),
+      endDate: getOffsetDate(4),
+    });
+
+    const b1Requests = (await callQuery(requestsModule.listMine, b1Ctx, {})) as Array<{
+      toolName: string;
+    }>;
+    assert.equal(b1Requests.length, 1);
+    assert.equal(b1Requests[0].toolName, "DeWalt Miter Saw");
+
+    const b2Requests = (await callQuery(requestsModule.listMine, b2Ctx, {})) as Array<{
+      toolName: string;
+    }>;
+    assert.equal(b2Requests.length, 1);
+  });
+
+  // 13. Lender sees requests only for their own tools in listIncoming
+  it("Requirement 13: Lender sees requests only for their own tools in listIncoming", async () => {
+    const db = new MockConvexDb();
+    const { toolId: tool1, lenderCtx: l1Ctx } = await setupLenderAndTool(db);
+
+    // Lender 2
+    const l2Ctx = createMockContext(db, { subject: "clerk_lender2", name: "Lender 2" });
+    await callMutation(usersModule.ensureCurrentUser, l2Ctx, {});
+    const tool2 = (await callMutation(toolsModule.create, l2Ctx, {
+      name: "Pressure Washer",
+      category: "Garden",
+      condition: "good",
+      description: "Electric pressure washer",
+    })) as string;
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_borrower", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    // Request tool 1
+    await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: tool1 as unknown as Id<"tools">,
+      startDate: getOffsetDate(1),
+      endDate: getOffsetDate(2),
+    });
+
+    // Request tool 2
+    await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: tool2 as unknown as Id<"tools">,
+      startDate: getOffsetDate(3),
+      endDate: getOffsetDate(4),
+    });
+
+    const l1Incoming = (await callQuery(requestsModule.listIncoming, l1Ctx, {})) as Array<{
+      toolName: string;
+      borrowerDisplayName: string;
+    }>;
+    assert.equal(l1Incoming.length, 1);
+    assert.equal(l1Incoming[0].toolName, "DeWalt Miter Saw");
+    assert.equal(l1Incoming[0].borrowerDisplayName, "Borrower");
+
+    const l2Incoming = (await callQuery(requestsModule.listIncoming, l2Ctx, {})) as Array<{
+      toolName: string;
+    }>;
+    assert.equal(l2Incoming.length, 1);
+    assert.equal(l2Incoming[0].toolName, "Pressure Washer");
+  });
+
+  // 14. Unrelated user cannot access request details via getById
+  it("Requirement 14: Unrelated user cannot access request details via getById", async () => {
+    const db = new MockConvexDb();
+    const { toolId, lenderCtx } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    const reqId = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(1),
+      endDate: getOffsetDate(2),
+    })) as string;
+
+    // Borrower can access
+    const borrowerReq = await callQuery(requestsModule.getById, borrowerCtx, {
+      requestId: reqId as unknown as Id<"borrowRequests">,
+    });
+    assert.ok(borrowerReq);
+
+    // Lender can access
+    const lenderReq = await callQuery(requestsModule.getById, lenderCtx, {
+      requestId: reqId as unknown as Id<"borrowRequests">,
+    });
+    assert.ok(lenderReq);
+
+    // Unrelated user is rejected (returns null)
+    const strangerCtx = createMockContext(db, { subject: "clerk_stranger", name: "Stranger" });
+    await callMutation(usersModule.ensureCurrentUser, strangerCtx, {});
+
+    const strangerReq = await callQuery(requestsModule.getById, strangerCtx, {
+      requestId: reqId as unknown as Id<"borrowRequests">,
+    });
+    assert.equal(strangerReq, null, "Unrelated user must receive null");
+  });
+
+  // 15. User cannot spoof borrower identity or initial request status
+  it("Requirement 15: User cannot spoof borrower identity or initial request status", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    const b = (await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {})) as {
+      _id: string;
+    };
+
+    const reqId = (await callMutation(
+      requestsModule.create,
+      borrowerCtx,
+      {
+        toolId: toolId as unknown as Id<"tools">,
+        startDate: getOffsetDate(1),
+        endDate: getOffsetDate(2),
+        status: "approved",
+        borrowerId: "spoofed_id",
+      } as unknown as Record<string, unknown>
+    )) as string;
+
+    const request = (await db.get(reqId))!;
+    assert.equal(request.status, "pending", "Initial status must strictly be 'pending'");
+    assert.equal(request.borrowerId, b._id, "Borrower ID must be derived from session");
+  });
+
+  // 16. Maximum duration constraint check
+  it("Requirement 16: Borrowing period exceeding 30 days is rejected", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderAndTool(db);
+
+    const borrowerCtx = createMockContext(db, { subject: "clerk_b", name: "Borrower" });
+    await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.create, borrowerCtx, {
+          toolId: toolId as unknown as Id<"tools">,
+          startDate: getOffsetDate(1),
+          endDate: getOffsetDate(35), // 35 days exceeds 30
+        });
+      },
+      {
+        message: /cannot exceed 30 days/i,
+      }
+    );
+  });
+});
+

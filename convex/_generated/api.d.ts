@@ -13,6 +13,7 @@ import type * as constants from "../constants.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_permissions from "../lib/permissions.js";
 import type * as lib_validation from "../lib/validation.js";
+import type * as requests from "../requests.js";
 import type * as tools from "../tools.js";
 import type * as users from "../users.js";
 
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/permissions": typeof lib_permissions;
   "lib/validation": typeof lib_validation;
+  requests: typeof requests;
   tools: typeof tools;
   users: typeof users;
 }>;

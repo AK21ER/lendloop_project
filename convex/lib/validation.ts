@@ -4,6 +4,8 @@ import {
   TOOL_STATUSES,
   MAX_NAME_LENGTH,
   MAX_DESCRIPTION_LENGTH,
+  DEFAULT_TIMEZONE,
+  MAX_BORROW_DAYS,
   type ToolCategory,
   type ToolCondition,
   type ToolStatus,
@@ -70,4 +72,107 @@ export function validateStatus(status: unknown): ToolStatus {
     );
   }
   return status as ToolStatus;
+}
+
+/**
+ * Validates strict YYYY-MM-DD format and actual calendar validity.
+ */
+export function validateDateString(dateStr: unknown, fieldName: string): string {
+  if (typeof dateStr !== "string") {
+    throw new Error(`${fieldName} must be a string in YYYY-MM-DD format`);
+  }
+
+  const formatRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!formatRegex.test(dateStr)) {
+    throw new Error(
+      `${fieldName} "${dateStr}" is invalid. Expected format: YYYY-MM-DD`
+    );
+  }
+
+  const parts = dateStr.split("-").map(Number);
+  const year = parts[0];
+  const month = parts[1];
+  const day = parts[2];
+
+  if (month < 1 || month > 12) {
+    throw new Error(`${fieldName} has invalid month: ${month}`);
+  }
+
+  const dateObj = new Date(Date.UTC(year, month - 1, day));
+  if (
+    dateObj.getUTCFullYear() !== year ||
+    dateObj.getUTCMonth() !== month - 1 ||
+    dateObj.getUTCDate() !== day
+  ) {
+    throw new Error(
+      `${fieldName} "${dateStr}" is not a valid calendar date`
+    );
+  }
+
+  return dateStr;
+}
+
+/**
+ * Returns current date in YYYY-MM-DD for the business timezone.
+ */
+export function getTodayInTimezone(timezone: string = DEFAULT_TIMEZONE): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return formatter.format(new Date());
+}
+
+/**
+ * Validates borrow request date range.
+ * - Format & calendar validity
+ * - Start date not in past (relative to business timezone)
+ * - End date >= start date
+ * - Maximum duration <= MAX_BORROW_DAYS
+ */
+export function validateDateRange(
+  startDateStr: unknown,
+  endDateStr: unknown,
+  timezone: string = DEFAULT_TIMEZONE
+): {
+  startDate: string;
+  endDate: string;
+  durationDays: number;
+} {
+  const startDate = validateDateString(startDateStr, "Start date");
+  const endDate = validateDateString(endDateStr, "End date");
+
+  const today = getTodayInTimezone(timezone);
+  if (startDate < today) {
+    throw new Error(
+      `Borrowing start date (${startDate}) cannot be in the past (today in ${timezone} is ${today})`
+    );
+  }
+
+  if (endDate < startDate) {
+    throw new Error(
+      `Borrowing end date (${endDate}) cannot be earlier than start date (${startDate})`
+    );
+  }
+
+  const [sYear, sMonth, sDay] = startDate.split("-").map(Number);
+  const [eYear, eMonth, eDay] = endDate.split("-").map(Number);
+
+  const startMs = Date.UTC(sYear, sMonth - 1, sDay);
+  const endMs = Date.UTC(eYear, eMonth - 1, eDay);
+  const durationDays = Math.round((endMs - startMs) / (1000 * 60 * 60 * 24)) + 1;
+
+  if (durationDays > MAX_BORROW_DAYS) {
+    throw new Error(
+      `Borrowing duration cannot exceed ${MAX_BORROW_DAYS} days (requested duration: ${durationDays} days)`
+    );
+  }
+
+  return {
+    startDate,
+    endDate,
+    durationDays,
+  };
 }

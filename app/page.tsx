@@ -23,9 +23,14 @@ function UserProfileAndTools() {
   const ensureUser = useMutation(api.users.ensureCurrentUser);
 
   const myListings = useQuery(api.tools.listMine, me ? {} : "skip");
+  const browseTools = useQuery(api.tools.listAll, me ? {} : "skip");
+  const myRequests = useQuery(api.requests.listMine, me ? {} : "skip");
+  const incomingRequests = useQuery(api.requests.listIncoming, me ? {} : "skip");
+
   const createTool = useMutation(api.tools.create);
   const updateTool = useMutation(api.tools.update);
   const removeMine = useMutation(api.tools.removeMine);
+  const createRequest = useMutation(api.requests.create);
 
   const [createForm, setCreateForm] = useState({
     name: "",
@@ -39,6 +44,19 @@ function UserProfileAndTools() {
   const [editName, setEditName] = useState("");
   const [editCondition, setEditCondition] = useState("");
   const [editDesc, setEditDesc] = useState("");
+
+  // Borrow Request State
+  const [borrowModalTool, setBorrowModalTool] = useState<{
+    _id: Id<"tools">;
+    name: string;
+    category: string;
+    condition: string;
+  } | null>(null);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [requestSuccess, setRequestSuccess] = useState<string | null>(null);
+  const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
 
   // Auto-sync profile on mount
   useEffect(() => {
@@ -105,6 +123,44 @@ function UserProfileAndTools() {
     }
   };
 
+  const handleOpenBorrowModal = (tool: {
+    _id: Id<"tools">;
+    name: string;
+    category: string;
+    condition: string;
+  }) => {
+    setBorrowModalTool(tool);
+    setStartDate("");
+    setEndDate("");
+    setRequestError(null);
+    setRequestSuccess(null);
+  };
+
+  const handleSubmitBorrowRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!borrowModalTool) return;
+    setIsSubmittingRequest(true);
+    setRequestError(null);
+    setRequestSuccess(null);
+
+    try {
+      await createRequest({
+        toolId: borrowModalTool._id,
+        startDate,
+        endDate,
+      });
+      setRequestSuccess("Borrow request submitted successfully (pending owner approval)!");
+      setTimeout(() => {
+        setBorrowModalTool(null);
+        setRequestSuccess(null);
+      }, 2500);
+    } catch (err: unknown) {
+      setRequestError(err instanceof Error ? err.message : "Failed to submit borrow request");
+    } finally {
+      setIsSubmittingRequest(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Profile Section */}
@@ -133,6 +189,218 @@ function UserProfileAndTools() {
             <code className="text-xs">{identity?.clerkId ?? me?.clerkId}</code>
           </p>
         </div>
+      </section>
+
+      {/* Browse Tools to Borrow Section */}
+      <section className="rounded-lg border bg-white p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-2">Browse Available Tools</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Select another neighbor&apos;s active tool to submit a borrow request.
+        </p>
+
+        {browseTools === undefined ? (
+          <p className="text-sm text-gray-500">Loading tools...</p>
+        ) : browseTools.length === 0 ? (
+          <p className="text-sm text-gray-500">No active tools currently available to borrow.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {browseTools.map((tool) => {
+              const isOwnTool = me ? tool.ownerId === me._id : false;
+              return (
+                <div key={tool._id} className="rounded border p-4 bg-gray-50 space-y-2 flex flex-col justify-between">
+                  <div>
+                    <div className="flex justify-between items-start">
+                      <h4 className="font-semibold text-gray-900">{tool.name}</h4>
+                      <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                        {tool.category}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Condition: <span className="font-medium text-gray-700">{tool.condition}</span>
+                    </p>
+                    {tool.description && (
+                      <p className="text-xs text-gray-600 mt-2 line-clamp-2">{tool.description}</p>
+                    )}
+                  </div>
+
+                  <div className="pt-2">
+                    {isOwnTool ? (
+                      <span className="inline-block text-xs text-gray-400 italic">
+                        Your Listing
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleOpenBorrowModal(tool)}
+                        className="w-full rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700"
+                      >
+                        Request to Borrow
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Borrow Request Modal / Inline Box */}
+      {borrowModalTool && (
+        <section className="rounded-lg border-2 border-indigo-500 bg-indigo-50 p-6 shadow-md">
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-lg font-bold text-gray-900">
+              Request to Borrow: {borrowModalTool.name}
+            </h3>
+            <button
+              onClick={() => setBorrowModalTool(null)}
+              className="text-gray-500 hover:text-gray-700 text-sm font-semibold"
+            >
+              ✕ Cancel
+            </button>
+          </div>
+
+          <p className="text-xs text-gray-600 mb-4">
+            Category: <span className="font-medium">{borrowModalTool.category}</span> | Condition: <span className="font-medium">{borrowModalTool.condition}</span>
+          </p>
+
+          <form onSubmit={handleSubmitBorrowRequest} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700">Start Date (inclusive)</label>
+                <input
+                  type="date"
+                  required
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="mt-1 w-full rounded border bg-white px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700">End Date (inclusive)</label>
+                <input
+                  type="date"
+                  required
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="mt-1 w-full rounded border bg-white px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            {requestError && (
+              <div className="rounded bg-red-100 p-2 text-xs font-medium text-red-700">
+                {requestError}
+              </div>
+            )}
+
+            {requestSuccess && (
+              <div className="rounded bg-green-100 p-2 text-xs font-medium text-green-700">
+                {requestSuccess}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={isSubmittingRequest}
+                className="rounded bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {isSubmittingRequest ? "Submitting..." : "Submit Borrow Request"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setBorrowModalTool(null)}
+                className="rounded border bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {/* My Requests Section */}
+      <section className="rounded-lg border bg-white p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-2">My Requests ({myRequests?.length ?? 0})</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Borrow requests you have submitted to other tool owners.
+        </p>
+
+        {myRequests === undefined ? (
+          <p className="text-sm text-gray-500">Loading requests...</p>
+        ) : myRequests.length === 0 ? (
+          <p className="text-sm text-gray-500">You have not submitted any borrow requests yet.</p>
+        ) : (
+          <div className="divide-y">
+            {myRequests.map((req) => (
+              <div key={req._id} className="py-3 flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold text-gray-900">{req.toolName}</h4>
+                  <p className="text-xs text-gray-500">
+                    Category: {req.toolCategory} | Requested Dates: <span className="font-medium text-gray-700">{req.startDate} to {req.endDate}</span>
+                  </p>
+                </div>
+                <div>
+                  <span
+                    className={`rounded px-2 py-1 text-xs font-semibold ${
+                      req.status === "pending"
+                        ? "bg-yellow-100 text-yellow-800"
+                        : req.status === "approved"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-red-100 text-red-800"
+                    }`}
+                  >
+                    {req.status.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Incoming Requests Section */}
+      <section className="rounded-lg border bg-white p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-2">Incoming Requests ({incomingRequests?.length ?? 0})</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Borrow requests from neighbors for your tools (Approval workflow will be enabled in Phase 3.3).
+        </p>
+
+        {incomingRequests === undefined ? (
+          <p className="text-sm text-gray-500">Loading incoming requests...</p>
+        ) : incomingRequests.length === 0 ? (
+          <p className="text-sm text-gray-500">No incoming borrow requests for your tools.</p>
+        ) : (
+          <div className="divide-y">
+            {incomingRequests.map((req) => (
+              <div key={req._id} className="py-3 flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold text-gray-900">{req.toolName}</h4>
+                  <p className="text-xs text-gray-500">
+                    Requested by: <span className="font-medium text-gray-800">{req.borrowerDisplayName}</span>
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Dates: <span className="font-medium text-gray-700">{req.startDate} to {req.endDate}</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`rounded px-2 py-1 text-xs font-semibold ${
+                      req.status === "pending"
+                        ? "bg-yellow-100 text-yellow-800"
+                        : req.status === "approved"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-red-100 text-red-800"
+                    }`}
+                  >
+                    {req.status.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Create Listing Section */}
