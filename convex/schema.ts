@@ -6,6 +6,7 @@ import {
   TOOL_STATUSES,
   USER_ROLES,
   REQUEST_STATUSES,
+  LOAN_STATUSES,
 } from "./constants";
 
 export const toolCategoryValidator = v.union(
@@ -38,6 +39,11 @@ export const requestStatusValidator = v.union(
   v.literal(REQUEST_STATUSES[0]),
   v.literal(REQUEST_STATUSES[1]),
   v.literal(REQUEST_STATUSES[2])
+);
+
+export const loanStatusValidator = v.union(
+  v.literal(LOAN_STATUSES[0]),
+  v.literal(LOAN_STATUSES[1])
 );
 
 export default defineSchema({
@@ -76,4 +82,20 @@ export default defineSchema({
     .index("by_tool_status", ["toolId", "status"])
     .index("by_lender", ["lenderId"])
     .index("by_lender_status", ["lenderId", "status"]),
+
+  loans: defineTable({
+    requestId: v.id("borrowRequests"),
+    toolId: v.id("tools"),
+    lenderId: v.id("users"),
+    borrowerId: v.id("users"),
+    startDate: v.string(),
+    dueDate: v.string(),
+    status: loanStatusValidator,
+    returnedAt: v.optional(v.number()),
+  })
+    .index("by_request", ["requestId"])
+    .index("by_tool_status", ["toolId", "status"])
+    .index("by_borrower", ["borrowerId"])
+    .index("by_lender", ["lenderId"])
+    .index("by_status_due", ["status", "dueDate"]),
 });

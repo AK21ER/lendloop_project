@@ -176,3 +176,30 @@ export function validateDateRange(
     durationDays,
   };
 }
+
+/**
+ * Checks whether two inclusive date ranges overlap.
+ * Overlap condition: startA <= endB AND endA >= startB
+ */
+export function doDateRangesOverlap(
+  startA: string,
+  endA: string,
+  startB: string,
+  endB: string
+): boolean {
+  return startA <= endB && endA >= startB;
+}
+
+/**
+ * Calculates whether an active loan is overdue according to the business timezone.
+ */
+export function isLoanOverdue(
+  dueDate: string,
+  status: string,
+  timezone: string = DEFAULT_TIMEZONE
+): boolean {
+  if (status !== "active") return false;
+  const today = getTodayInTimezone(timezone);
+  return dueDate < today;
+}
+

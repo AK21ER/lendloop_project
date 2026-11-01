@@ -24,6 +24,7 @@ export class MockConvexDb {
     this.tables.set("users", new Map());
     this.tables.set("tools", new Map());
     this.tables.set("borrowRequests", new Map());
+    this.tables.set("loans", new Map());
   }
 
   async runTransaction<T>(fn: () => Promise<T>): Promise<T> {

@@ -11,6 +11,7 @@ import {
 import * as usersModule from "../convex/users";
 import * as toolsModule from "../convex/tools";
 import * as requestsModule from "../convex/requests";
+import * as loansModule from "../convex/loans";
 import * as authTestModule from "../convex/authTest";
 import { requireAdmin, requireToolOwner } from "../convex/lib/permissions";
 import { requireAuthenticatedUser } from "../convex/lib/auth";
@@ -933,4 +934,572 @@ describe("LendLoop Phase 3.2: Borrow Request Backend", () => {
     );
   });
 });
+
+describe("LendLoop Phase 3.3: Approval, Loan Creation & Returns", () => {
+  // Setup helper for lender, borrower, and active tool
+  async function setupLenderBorrowerAndRequest(db: MockConvexDb) {
+    const lenderCtx = createMockContext(db, {
+      subject: "clerk_lender_33",
+      name: "Leo Lender",
+    });
+    const lender = (await callMutation(usersModule.ensureCurrentUser, lenderCtx, {})) as {
+      _id: string;
+    };
+
+    const toolId = (await callMutation(toolsModule.create, lenderCtx, {
+      name: "Table Saw",
+      category: "Power Tools",
+      condition: "new",
+      description: "10-inch portable table saw",
+    })) as string;
+
+    const borrowerCtx = createMockContext(db, {
+      subject: "clerk_borrower_33",
+      name: "Bella Borrower",
+    });
+    const borrower = (await callMutation(usersModule.ensureCurrentUser, borrowerCtx, {})) as {
+      _id: string;
+    };
+
+    const startDate = getOffsetDate(2);
+    const endDate = getOffsetDate(5);
+
+    const requestId = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate,
+      endDate,
+    })) as string;
+
+    return { lenderCtx, lender, borrowerCtx, borrower, toolId, requestId, startDate, endDate };
+  }
+
+  // 1. Lender approves a pending request
+  it("Requirement 1: Lender approves a pending request and creates a loan", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, lender, borrower, toolId, requestId, startDate, endDate } =
+      await setupLenderBorrowerAndRequest(db);
+
+    const result = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string; alreadyApproved: boolean };
+
+    assert.ok(result.loanId);
+    assert.equal(result.alreadyApproved, false);
+
+    // Request is marked approved
+    const request = (await db.get(requestId))!;
+    assert.equal(request.status, "approved");
+    assert.ok(request.decidedAt);
+    assert.equal(request.decidedBy, lender._id);
+
+    // Loan is created with status active
+    const loan = (await db.get(result.loanId))!;
+    assert.equal(loan.requestId, requestId);
+    assert.equal(loan.toolId, toolId);
+    assert.equal(loan.lenderId, lender._id);
+    assert.equal(loan.borrowerId, borrower._id);
+    assert.equal(loan.startDate, startDate);
+    assert.equal(loan.dueDate, endDate);
+    assert.equal(loan.status, "active");
+  });
+
+  // 2. Borrower cannot approve their own request
+  it("Requirement 2: Borrower cannot approve their own request", async () => {
+    const db = new MockConvexDb();
+    const { borrowerCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, borrowerCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Borrower cannot approve their own request/i,
+      }
+    );
+  });
+
+  // 3. Unrelated user cannot approve or decline
+  it("Requirement 3: Unrelated user cannot approve or decline", async () => {
+    const db = new MockConvexDb();
+    const { requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const strangerCtx = createMockContext(db, {
+      subject: "clerk_stranger_33",
+      name: "Steve Stranger",
+    });
+    await callMutation(usersModule.ensureCurrentUser, strangerCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, strangerCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Forbidden: Only the tool owner/i,
+      }
+    );
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.decline, strangerCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Forbidden: Only the tool owner/i,
+      }
+    );
+  });
+
+  // 4. Approval creates exactly one loan
+  it("Requirement 4: Approval creates exactly one loan record", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    const loans = await db.query("loans").collect();
+    assert.equal(loans.length, 1);
+  });
+
+  // 5. Duplicate approval does not create a second loan (idempotent)
+  it("Requirement 5: Duplicate approval does not create a second loan (idempotency)", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const res1 = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string; alreadyApproved: boolean };
+
+    const res2 = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string; alreadyApproved: boolean };
+
+    assert.equal(res1.alreadyApproved, false);
+    assert.equal(res2.alreadyApproved, true);
+    assert.equal(res1.loanId, res2.loanId);
+
+    const allLoans = await db.query("loans").collect();
+    assert.equal(allLoans.length, 1, "Must not create duplicate loans on retry");
+  });
+
+  // 6. Declining a pending request succeeds
+  it("Requirement 6: Declining a pending request succeeds without creating a loan", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, lender, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const res = (await callMutation(requestsModule.decline, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { success: boolean; alreadyDeclined: boolean };
+
+    assert.equal(res.success, true);
+    assert.equal(res.alreadyDeclined, false);
+
+    const req = (await db.get(requestId))!;
+    assert.equal(req.status, "declined");
+    assert.equal(req.decidedBy, lender._id);
+
+    const loans = await db.query("loans").collect();
+    assert.equal(loans.length, 0, "No loan should be created for declined request");
+  });
+
+  // 7. Declined request cannot be approved
+  it("Requirement 7: Declined request cannot be approved", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    await callMutation(requestsModule.decline, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, lenderCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Cannot approve a declined request/i,
+      }
+    );
+  });
+
+  // 8. Approved request cannot be declined
+  it("Requirement 8: Approved request cannot be declined", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.decline, lenderCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Cannot decline an already approved request/i,
+      }
+    );
+  });
+
+  // 9. Overlapping active loans cannot be approved
+  it("Requirement 9: Overlapping active loans cannot be approved", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, toolId } = await setupLenderBorrowerAndRequest(db);
+
+    // Borrower 1 requests Day 5 to Day 10
+    const req1 = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(5),
+      endDate: getOffsetDate(10),
+    })) as string;
+
+    // Lender approves req1 -> Loan 1 created for Day 5 to Day 10
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: req1 as unknown as Id<"borrowRequests">,
+    });
+
+    // Borrower 2 requests Day 8 to Day 12 (overlaps with Day 5-10 on days 8, 9, 10)
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2_33", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+    const req2 = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(8),
+      endDate: getOffsetDate(12),
+    })) as string;
+
+    // Approval of req2 must fail due to overlap
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, lenderCtx, {
+          requestId: req2 as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Conflicts with an existing active loan/i,
+      }
+    );
+  });
+
+  // 10. Nonoverlapping date ranges can be approved
+  it("Requirement 10: Nonoverlapping date ranges can be approved", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, toolId } = await setupLenderBorrowerAndRequest(db);
+
+    // Request 1: Day 2 to Day 4
+    const req1 = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(2),
+      endDate: getOffsetDate(4),
+    })) as string;
+
+    // Request 2: Day 6 to Day 8
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2_33", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+    const req2 = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(6),
+      endDate: getOffsetDate(8),
+    })) as string;
+
+    const res1 = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: req1 as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    const res2 = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: req2 as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    assert.ok(res1.loanId);
+    assert.ok(res2.loanId);
+    assert.notEqual(res1.loanId, res2.loanId);
+
+    const loans = await db.query("loans").collect();
+    assert.equal(loans.length, 2);
+  });
+
+  // 11. Adjacent inclusive date ranges follow the defined overlap policy
+  it("Requirement 11: Adjacent inclusive date ranges follow defined overlap policy", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, toolId } = await setupLenderBorrowerAndRequest(db);
+
+    // Loan 1: Day 3 to Day 5
+    const req1 = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(3),
+      endDate: getOffsetDate(5),
+    })) as string;
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: req1 as unknown as Id<"borrowRequests">,
+    });
+
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2_33", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+
+    // Overlapping on inclusive boundary (Day 5 to Day 7) -> must be rejected
+    const reqSameDay = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(5),
+      endDate: getOffsetDate(7),
+    })) as string;
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, lenderCtx, {
+          requestId: reqSameDay as unknown as Id<"borrowRequests">,
+        });
+      },
+      {
+        message: /Conflicts with an existing active loan/i,
+      }
+    );
+
+    // Next day (Day 6 to Day 8) -> nonoverlapping, must succeed
+    const reqNextDay = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(6),
+      endDate: getOffsetDate(8),
+    })) as string;
+
+    const res = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: reqNextDay as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+    assert.ok(res.loanId);
+  });
+
+  // 12. Concurrent conflicting approvals cannot create overlapping loans
+  it("Requirement 12: Concurrent conflicting approvals are safely serialized and rejected", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, toolId } = await setupLenderBorrowerAndRequest(db);
+
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2_33", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+
+    // Two requests for identical dates
+    const req1 = (await callMutation(requestsModule.create, borrowerCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(3),
+      endDate: getOffsetDate(6),
+    })) as string;
+
+    const req2 = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(3),
+      endDate: getOffsetDate(6),
+    })) as string;
+
+    // Simulate concurrent approval execution
+    const results = await Promise.allSettled([
+      callMutation(requestsModule.approve, lenderCtx, {
+        requestId: req1 as unknown as Id<"borrowRequests">,
+      }),
+      callMutation(requestsModule.approve, lenderCtx, {
+        requestId: req2 as unknown as Id<"borrowRequests">,
+      }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+
+    assert.equal(fulfilled.length, 1, "Exactly one approval must succeed");
+    assert.equal(rejected.length, 1, "The conflicting approval must be rejected");
+
+    const loans = await db.query("loans").collect();
+    assert.equal(loans.length, 1);
+  });
+
+  // 13. Borrower and lender see only their authorized loans
+  it("Requirement 13: Borrower and lender see only their authorized loans", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Lender sees it
+    const lenderLoans = (await callQuery(loansModule.listMine, lenderCtx, {})) as Array<{
+      _id: string;
+      isLender: boolean;
+      toolName: string;
+    }>;
+    assert.equal(lenderLoans.length, 1);
+    assert.equal(lenderLoans[0].isLender, true);
+    assert.equal(lenderLoans[0].toolName, "Table Saw");
+
+    // Borrower sees it
+    const borrowerLoans = (await callQuery(loansModule.listMine, borrowerCtx, {})) as Array<{
+      _id: string;
+      isBorrower: boolean;
+      toolName: string;
+    }>;
+    assert.equal(borrowerLoans.length, 1);
+    assert.equal(borrowerLoans[0].isBorrower, true);
+
+    // Unrelated stranger gets empty listMine and null getById
+    const strangerCtx = createMockContext(db, { subject: "clerk_stranger_33", name: "Stranger" });
+    await callMutation(usersModule.ensureCurrentUser, strangerCtx, {});
+
+    const strangerLoans = (await callQuery(loansModule.listMine, strangerCtx, {})) as Array<unknown>;
+    assert.equal(strangerLoans.length, 0);
+
+    const strangerLoan = await callQuery(loansModule.getById, strangerCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    });
+    assert.equal(strangerLoan, null);
+  });
+
+  // 14. Only lender can mark a loan returned
+  it("Requirement 14: Only lender can mark a loan returned", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Borrower attempt to mark returned is rejected
+    await assert.rejects(
+      async () => {
+        await callMutation(loansModule.markReturned, borrowerCtx, {
+          loanId: approveRes.loanId as unknown as Id<"loans">,
+        });
+      },
+      {
+        message: /Forbidden: Only the tool lender/i,
+      }
+    );
+
+    // Lender succeeds
+    const returnRes = (await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    })) as { success: boolean; alreadyReturned: boolean };
+    assert.equal(returnRes.success, true);
+    assert.equal(returnRes.alreadyReturned, false);
+
+    const loanInDb = (await db.get(approveRes.loanId))!;
+    assert.equal(loanInDb.status, "returned");
+    assert.ok(loanInDb.returnedAt);
+  });
+
+  // 15. Repeated return calls are safe (idempotent)
+  it("Requirement 15: Repeated return calls are safe and idempotent", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    const res1 = (await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    })) as { success: boolean; alreadyReturned: boolean };
+
+    const res2 = (await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    })) as { success: boolean; alreadyReturned: boolean };
+
+    assert.equal(res1.alreadyReturned, false);
+    assert.equal(res2.alreadyReturned, true);
+  });
+
+  // 16. Returned loans are preserved and do not block subsequent loans
+  it("Requirement 16: Returned loans are preserved and do not block subsequent requests for same dates", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Mark loan returned early
+    await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    });
+
+    // Borrower 2 now requests the exact same dates
+    const b2Ctx = createMockContext(db, { subject: "clerk_b2_33", name: "Borrower 2" });
+    await callMutation(usersModule.ensureCurrentUser, b2Ctx, {});
+    const req2 = (await callMutation(requestsModule.create, b2Ctx, {
+      toolId: toolId as unknown as Id<"tools">,
+      startDate: getOffsetDate(2),
+      endDate: getOffsetDate(5),
+    })) as string;
+
+    // Approval now succeeds because the previous loan is 'returned', not 'active'!
+    const approve2 = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: req2 as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    assert.ok(approve2.loanId);
+
+    // Verify both loans exist in DB history
+    const allLoans = await db.query("loans").collect();
+    assert.equal(allLoans.length, 2);
+  });
+
+  // 17. Listing removal does not destroy approved loan history
+  it("Requirement 17: Listing removal preserves approved loan history", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Lender removes the tool listing
+    await callMutation(toolsModule.removeMine, lenderCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    });
+
+    // Tool status is removed
+    const tool = (await db.get(toolId))!;
+    assert.equal(tool.status, "removed");
+
+    // Loan still exists in DB and can be queried and marked returned
+    const loan = (await db.get(approveRes.loanId))!;
+    assert.ok(loan);
+    assert.equal(loan.status, "active");
+
+    const returnRes = (await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    })) as { success: boolean };
+    assert.equal(returnRes.success, true);
+  });
+
+  // 18. Availability query returns active booked dates
+  it("Requirement 18: getToolAvailability returns active reserved dates", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    // Before approval, availability is empty
+    const unauthCtx = createMockContext(db, null);
+    const beforeAvail = (await callQuery(loansModule.getToolAvailability, unauthCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    })) as Array<{ startDate: string; dueDate: string }>;
+    assert.equal(beforeAvail.length, 0);
+
+    // Approve loan
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    // After approval, availability returns the booked range
+    const afterAvail = (await callQuery(loansModule.getToolAvailability, unauthCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    })) as Array<{ startDate: string; dueDate: string }>;
+    assert.equal(afterAvail.length, 1);
+    assert.equal(afterAvail[0].startDate, getOffsetDate(2));
+    assert.equal(afterAvail[0].dueDate, getOffsetDate(5));
+  });
+});
+
 

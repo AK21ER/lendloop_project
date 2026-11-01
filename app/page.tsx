@@ -17,6 +17,39 @@ import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { TOOL_CATEGORIES, TOOL_CONDITIONS } from "../convex/constants";
 
+function ToolAvailabilityView({ toolId }: { toolId: Id<"tools"> }) {
+  const activeLoans = useQuery(api.loans.getToolAvailability, { toolId });
+
+  if (activeLoans === undefined) {
+    return <p className="text-xs text-gray-500">Checking availability...</p>;
+  }
+
+  if (activeLoans.length === 0) {
+    return (
+      <div className="rounded bg-green-50 p-2 text-xs text-green-800 border border-green-200">
+        ✓ No active loans scheduled. All dates currently open.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded bg-amber-50 p-2.5 text-xs text-amber-900 border border-amber-200 space-y-1">
+      <p className="font-semibold">Currently reserved dates (active loans):</p>
+      <ul className="list-disc list-inside space-y-0.5">
+        {activeLoans.map((l, i) => (
+          <li key={i}>
+            <span className="font-medium">{l.startDate}</span> to{" "}
+            <span className="font-medium">{l.dueDate}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[11px] text-amber-700">
+        Requests overlapping with active loans will be rejected upon approval.
+      </p>
+    </div>
+  );
+}
+
 function UserProfileAndTools() {
   const identity = useQuery(api.authTest.getMyIdentity, {});
   const me = useQuery(api.users.getMe, {});
@@ -26,11 +59,15 @@ function UserProfileAndTools() {
   const browseTools = useQuery(api.tools.listAll, me ? {} : "skip");
   const myRequests = useQuery(api.requests.listMine, me ? {} : "skip");
   const incomingRequests = useQuery(api.requests.listIncoming, me ? {} : "skip");
+  const myLoans = useQuery(api.loans.listMine, me ? {} : "skip");
 
   const createTool = useMutation(api.tools.create);
   const updateTool = useMutation(api.tools.update);
   const removeMine = useMutation(api.tools.removeMine);
   const createRequest = useMutation(api.requests.create);
+  const approveRequest = useMutation(api.requests.approve);
+  const declineRequest = useMutation(api.requests.decline);
+  const markReturned = useMutation(api.loans.markReturned);
 
   const [createForm, setCreateForm] = useState({
     name: "",
@@ -45,7 +82,7 @@ function UserProfileAndTools() {
   const [editCondition, setEditCondition] = useState("");
   const [editDesc, setEditDesc] = useState("");
 
-  // Borrow Request State
+  // Borrow Request Modal State
   const [borrowModalTool, setBorrowModalTool] = useState<{
     _id: Id<"tools">;
     name: string;
@@ -57,6 +94,20 @@ function UserProfileAndTools() {
   const [requestError, setRequestError] = useState<string | null>(null);
   const [requestSuccess, setRequestSuccess] = useState<string | null>(null);
   const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
+
+  // Incoming Requests Actions State
+  const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
+  const [requestActionMessage, setRequestActionMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  // Loan Actions State
+  const [loanActionLoadingId, setLoanActionLoadingId] = useState<string | null>(null);
+  const [loanActionMessage, setLoanActionMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
 
   // Auto-sync profile on mount
   useEffect(() => {
@@ -161,6 +212,72 @@ function UserProfileAndTools() {
     }
   };
 
+  const handleApproveRequest = async (requestId: Id<"borrowRequests">) => {
+    setRequestActionLoadingId(requestId);
+    setRequestActionMessage(null);
+    try {
+      const res = await approveRequest({ requestId });
+      setRequestActionMessage({
+        type: "success",
+        text: res.alreadyApproved
+          ? "Request was already approved."
+          : "Request approved and loan created successfully!",
+      });
+      setTimeout(() => setRequestActionMessage(null), 4000);
+    } catch (err: unknown) {
+      setRequestActionMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to approve request",
+      });
+    } finally {
+      setRequestActionLoadingId(null);
+    }
+  };
+
+  const handleDeclineRequest = async (requestId: Id<"borrowRequests">) => {
+    if (!confirm("Are you sure you want to decline this borrow request?")) return;
+    setRequestActionLoadingId(requestId);
+    setRequestActionMessage(null);
+    try {
+      const res = await declineRequest({ requestId });
+      setRequestActionMessage({
+        type: "success",
+        text: res.alreadyDeclined ? "Request was already declined." : "Request declined.",
+      });
+      setTimeout(() => setRequestActionMessage(null), 4000);
+    } catch (err: unknown) {
+      setRequestActionMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to decline request",
+      });
+    } finally {
+      setRequestActionLoadingId(null);
+    }
+  };
+
+  const handleMarkReturned = async (loanId: Id<"loans">) => {
+    if (!confirm("Confirm that this tool has been returned in satisfactory condition?")) return;
+    setLoanActionLoadingId(loanId);
+    setLoanActionMessage(null);
+    try {
+      const res = await markReturned({ loanId });
+      setLoanActionMessage({
+        type: "success",
+        text: res.alreadyReturned
+          ? "Loan was already marked returned."
+          : "Loan marked as returned!",
+      });
+      setTimeout(() => setLoanActionMessage(null), 4000);
+    } catch (err: unknown) {
+      setLoanActionMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to mark tool returned",
+      });
+    } finally {
+      setLoanActionLoadingId(null);
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Profile Section */}
@@ -259,9 +376,15 @@ function UserProfileAndTools() {
             </button>
           </div>
 
-          <p className="text-xs text-gray-600 mb-4">
-            Category: <span className="font-medium">{borrowModalTool.category}</span> | Condition: <span className="font-medium">{borrowModalTool.condition}</span>
+          <p className="text-xs text-gray-600 mb-3">
+            Category: <span className="font-medium">{borrowModalTool.category}</span> | Condition:{" "}
+            <span className="font-medium">{borrowModalTool.condition}</span>
           </p>
+
+          {/* Availability helper */}
+          <div className="mb-4">
+            <ToolAvailabilityView toolId={borrowModalTool._id} />
+          </div>
 
           <form onSubmit={handleSubmitBorrowRequest} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -338,12 +461,15 @@ function UserProfileAndTools() {
                 <div>
                   <h4 className="font-semibold text-gray-900">{req.toolName}</h4>
                   <p className="text-xs text-gray-500">
-                    Category: {req.toolCategory} | Requested Dates: <span className="font-medium text-gray-700">{req.startDate} to {req.endDate}</span>
+                    Category: {req.toolCategory} | Requested Dates:{" "}
+                    <span className="font-medium text-gray-700">
+                      {req.startDate} to {req.endDate}
+                    </span>
                   </p>
                 </div>
                 <div>
                   <span
-                    className={`rounded px-2 py-1 text-xs font-semibold ${
+                    className={`rounded px-2.5 py-1 text-xs font-semibold ${
                       req.status === "pending"
                         ? "bg-yellow-100 text-yellow-800"
                         : req.status === "approved"
@@ -360,12 +486,24 @@ function UserProfileAndTools() {
         )}
       </section>
 
-      {/* Incoming Requests Section */}
+      {/* Incoming Requests Section (Phase 3.3 Approval Workflow) */}
       <section className="rounded-lg border bg-white p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-2">Incoming Requests ({incomingRequests?.length ?? 0})</h2>
         <p className="text-xs text-gray-500 mb-4">
-          Borrow requests from neighbors for your tools (Approval workflow will be enabled in Phase 3.3).
+          Borrow requests from neighbors for your tools. Approving creates an active loan immediately.
         </p>
+
+        {requestActionMessage && (
+          <div
+            className={`mb-4 rounded p-3 text-xs font-medium ${
+              requestActionMessage.type === "success"
+                ? "bg-green-100 text-green-800 border border-green-200"
+                : "bg-red-100 text-red-800 border border-red-200"
+            }`}
+          >
+            {requestActionMessage.text}
+          </div>
+        )}
 
         {incomingRequests === undefined ? (
           <p className="text-sm text-gray-500">Loading incoming requests...</p>
@@ -373,32 +511,154 @@ function UserProfileAndTools() {
           <p className="text-sm text-gray-500">No incoming borrow requests for your tools.</p>
         ) : (
           <div className="divide-y">
-            {incomingRequests.map((req) => (
-              <div key={req._id} className="py-3 flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold text-gray-900">{req.toolName}</h4>
-                  <p className="text-xs text-gray-500">
-                    Requested by: <span className="font-medium text-gray-800">{req.borrowerDisplayName}</span>
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    Dates: <span className="font-medium text-gray-700">{req.startDate} to {req.endDate}</span>
-                  </p>
+            {incomingRequests.map((req) => {
+              const isActioning = requestActionLoadingId === req._id;
+              return (
+                <div key={req._id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h4 className="font-semibold text-gray-900">{req.toolName}</h4>
+                    <p className="text-xs text-gray-500">
+                      Requested by: <span className="font-medium text-gray-800">{req.borrowerDisplayName}</span>
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Dates: <span className="font-medium text-gray-700">{req.startDate} to {req.endDate}</span>
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {req.status === "pending" ? (
+                      <>
+                        <button
+                          disabled={isActioning}
+                          onClick={() => handleApproveRequest(req._id)}
+                          className="rounded bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                        >
+                          {isActioning ? "Saving..." : "Approve"}
+                        </button>
+                        <button
+                          disabled={isActioning}
+                          onClick={() => handleDeclineRequest(req._id)}
+                          className="rounded bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                        >
+                          Decline
+                        </button>
+                      </>
+                    ) : (
+                      <span
+                        className={`rounded px-2.5 py-1 text-xs font-semibold ${
+                          req.status === "approved"
+                            ? "bg-green-100 text-green-800"
+                            : "bg-red-100 text-red-800"
+                        }`}
+                      >
+                        {req.status.toUpperCase()}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-semibold ${
-                      req.status === "pending"
-                        ? "bg-yellow-100 text-yellow-800"
-                        : req.status === "approved"
-                        ? "bg-green-100 text-green-800"
-                        : "bg-red-100 text-red-800"
-                    }`}
-                  >
-                    {req.status.toUpperCase()}
-                  </span>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* My Loans Section (Phase 3.3) */}
+      <section className="rounded-lg border bg-white p-6 shadow-sm">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-xl font-bold">My Loans ({myLoans?.length ?? 0})</h2>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          All active and completed loans where you are borrowing or lending.
+        </p>
+
+        {loanActionMessage && (
+          <div
+            className={`mb-4 rounded p-3 text-xs font-medium ${
+              loanActionMessage.type === "success"
+                ? "bg-green-100 text-green-800 border border-green-200"
+                : "bg-red-100 text-red-800 border border-red-200"
+            }`}
+          >
+            {loanActionMessage.text}
+          </div>
+        )}
+
+        {myLoans === undefined ? (
+          <p className="text-sm text-gray-500">Loading loans...</p>
+        ) : myLoans.length === 0 ? (
+          <p className="text-sm text-gray-500">No active or completed loans yet.</p>
+        ) : (
+          <div className="divide-y">
+            {myLoans.map((loan) => {
+              const isActioning = loanActionLoadingId === loan._id;
+              const isLender = loan.isLender;
+              const counterparty = isLender ? loan.borrowerDisplayName : loan.lenderDisplayName;
+
+              return (
+                <div key={loan._id} className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-gray-900">{loan.toolName}</h4>
+                      <span
+                        className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                          isLender
+                            ? "bg-purple-100 text-purple-800"
+                            : "bg-blue-100 text-blue-800"
+                        }`}
+                      >
+                        {isLender ? "Lending" : "Borrowing"}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-gray-500">
+                      {isLender ? "Borrower" : "Lender"}:{" "}
+                      <span className="font-medium text-gray-800">{counterparty}</span>
+                    </p>
+
+                    <p className="text-xs text-gray-500">
+                      Scheduled: <span className="font-medium text-gray-700">{loan.startDate}</span> to{" "}
+                      <span className="font-medium text-gray-700">{loan.dueDate}</span>
+                    </p>
+
+                    {loan.status === "returned" && loan.returnedAt && (
+                      <p className="text-[11px] text-gray-500">
+                        Returned on: {new Date(loan.returnedAt).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {/* Status Badges */}
+                    {loan.status === "active" ? (
+                      loan.isOverdue ? (
+                        <span className="rounded bg-red-100 text-red-800 px-2.5 py-1 text-xs font-semibold">
+                          OVERDUE
+                        </span>
+                      ) : (
+                        <span className="rounded bg-emerald-100 text-emerald-800 px-2.5 py-1 text-xs font-semibold">
+                          ACTIVE
+                        </span>
+                      )
+                    ) : (
+                      <span className="rounded bg-gray-100 text-gray-700 px-2.5 py-1 text-xs font-semibold">
+                        RETURNED
+                      </span>
+                    )}
+
+                    {/* Lender Mark Returned Action */}
+                    {isLender && loan.status === "active" && (
+                      <button
+                        disabled={isActioning}
+                        onClick={() => handleMarkReturned(loan._id)}
+                        className="rounded bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {isActioning ? "Saving..." : "Mark Returned"}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -533,7 +793,9 @@ function UserProfileAndTools() {
                     <div>
                       <h3 className="font-semibold text-gray-900">{tool.name}</h3>
                       <p className="text-xs text-gray-500">
-                        Category: <span className="font-medium text-gray-700">{tool.category}</span> | Condition: <span className="font-medium text-gray-700">{tool.condition}</span> | Status: <span className="font-medium text-gray-700">{tool.status}</span>
+                        Category: <span className="font-medium text-gray-700">{tool.category}</span> | Condition:{" "}
+                        <span className="font-medium text-gray-700">{tool.condition}</span> | Status:{" "}
+                        <span className="font-medium text-gray-700">{tool.status}</span>
                       </p>
                       {tool.description && (
                         <p className="mt-1 text-sm text-gray-600">{tool.description}</p>

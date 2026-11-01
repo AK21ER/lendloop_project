@@ -21,6 +21,9 @@ export type UserRole = (typeof USER_ROLES)[number];
 export const REQUEST_STATUSES = ["pending", "approved", "declined"] as const;
 export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
+export const LOAN_STATUSES = ["active", "returned"] as const;
+export type LoanStatus = (typeof LOAN_STATUSES)[number];
+
 export const DEFAULT_TIMEZONE = "Africa/Addis_Ababa";
 export const MAX_BORROW_DAYS = 30;
 
