@@ -6,6 +6,7 @@ import {
 } from "./lib/auth";
 import { checkToolAvailableForRequest } from "./lib/permissions";
 import { validateDateRange, doDateRangesOverlap } from "./lib/validation";
+import { logAuditEvent } from "./lib/audit";
 import type { RequestStatus } from "./constants";
 
 /**
@@ -83,6 +84,14 @@ export const create = mutation({
       status: "pending",
     });
 
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "request.create",
+      targetType: "borrowRequests",
+      targetId: requestId,
+      metadata: { toolId: args.toolId, startDate: args.startDate, endDate: args.endDate },
+    });
+
     return requestId;
   },
 });
@@ -121,11 +130,17 @@ export const approve = mutation({
       throw new Error("Borrow request not found");
     }
 
-    // Safe idempotency: If already approved by this lender, return existing loan
+    // 1. Strict authorization checks MUST occur BEFORE any idempotency or state disclosure!
+    if (request.borrowerId === user._id) {
+      throw new Error("Borrower cannot approve their own request");
+    }
+
+    if (request.lenderId !== user._id) {
+      throw new Error("Forbidden: Only the tool owner can approve this request");
+    }
+
+    // 2. Safe idempotency for the verified tool owner: return existing loan if already approved
     if (request.status === "approved") {
-      if (request.lenderId !== user._id) {
-        throw new Error("Forbidden: Only the tool owner can approve this request");
-      }
       const existingLoan = await ctx.db
         .query("loans")
         .withIndex("by_request", (q) => q.eq("requestId", request._id))
@@ -137,16 +152,7 @@ export const approve = mutation({
       };
     }
 
-    // Authorization checks
-    if (request.borrowerId === user._id) {
-      throw new Error("Borrower cannot approve their own request");
-    }
-
-    if (request.lenderId !== user._id) {
-      throw new Error("Forbidden: Only the tool owner can approve this request");
-    }
-
-    // State transition checks
+    // 3. State transition checks
     if (request.status === "declined") {
       throw new Error("Cannot approve a declined request");
     }
@@ -208,6 +214,14 @@ export const approve = mutation({
       status: "active",
     });
 
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "request.approve",
+      targetType: "borrowRequests",
+      targetId: request._id,
+      metadata: { loanId, toolId: request.toolId },
+    });
+
     return {
       loanId,
       alreadyApproved: false,
@@ -246,18 +260,7 @@ export const decline = mutation({
       throw new Error("Borrow request not found");
     }
 
-    // Safe idempotency: If already declined by this lender
-    if (request.status === "declined") {
-      if (request.lenderId !== user._id) {
-        throw new Error("Forbidden: Only the tool owner can decline this request");
-      }
-      return {
-        success: true,
-        alreadyDeclined: true,
-      };
-    }
-
-    // Authorization checks
+    // 1. Strict authorization checks MUST occur BEFORE any idempotency or state disclosure!
     if (request.borrowerId === user._id) {
       throw new Error("Borrower cannot decline this request");
     }
@@ -266,7 +269,15 @@ export const decline = mutation({
       throw new Error("Forbidden: Only the tool owner can decline this request");
     }
 
-    // State transition checks
+    // 2. Safe idempotency for the verified tool owner
+    if (request.status === "declined") {
+      return {
+        success: true,
+        alreadyDeclined: true,
+      };
+    }
+
+    // 3. State transition checks
     if (request.status === "approved") {
       throw new Error("Cannot decline an already approved request");
     }
@@ -280,6 +291,14 @@ export const decline = mutation({
       status: "declined",
       decidedAt: now,
       decidedBy: user._id,
+    });
+
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "request.decline",
+      targetType: "borrowRequests",
+      targetId: request._id,
+      metadata: { toolId: request.toolId },
     });
 
     return {

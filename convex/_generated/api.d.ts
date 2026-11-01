@@ -8,8 +8,10 @@
  * @module
  */
 
+import type * as admin from "../admin.js";
 import type * as authTest from "../authTest.js";
 import type * as constants from "../constants.js";
+import type * as lib_audit from "../lib/audit.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_permissions from "../lib/permissions.js";
 import type * as lib_validation from "../lib/validation.js";
@@ -25,8 +27,10 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  admin: typeof admin;
   authTest: typeof authTest;
   constants: typeof constants;
+  "lib/audit": typeof lib_audit;
   "lib/auth": typeof lib_auth;
   "lib/permissions": typeof lib_permissions;
   "lib/validation": typeof lib_validation;

@@ -25,6 +25,7 @@ export class MockConvexDb {
     this.tables.set("tools", new Map());
     this.tables.set("borrowRequests", new Map());
     this.tables.set("loans", new Map());
+    this.tables.set("auditLogs", new Map());
   }
 
   async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -89,6 +90,20 @@ export class MockConvexDb {
             current.reverse();
           }
           return this;
+        },
+        filter(predicateBuilder: (q: { eq: (a: unknown, b: unknown) => boolean; field: (name: string) => unknown }) => unknown) {
+          const filtered = current.filter((doc) => {
+            const q = {
+              eq(a: unknown, b: unknown) {
+                return a === b;
+              },
+              field(name: string) {
+                return doc[name];
+              },
+            };
+            return Boolean(predicateBuilder(q));
+          });
+          return createQueryChain(filtered);
         },
         async unique() {
           if (current.length > 1) {

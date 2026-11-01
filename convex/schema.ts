@@ -98,4 +98,17 @@ export default defineSchema({
     .index("by_borrower", ["borrowerId"])
     .index("by_lender", ["lenderId"])
     .index("by_status_due", ["status", "dueDate"]),
+
+  auditLogs: defineTable({
+    actorId: v.optional(v.id("users")),
+    action: v.string(),
+    targetType: v.string(),
+    targetId: v.string(),
+    metadata: v.optional(v.any()),
+    timestamp: v.number(),
+  })
+    .index("by_actor", ["actorId", "timestamp"])
+    .index("by_target", ["targetType", "targetId"])
+    .index("by_action_time", ["action", "timestamp"])
+    .index("by_timestamp", ["timestamp"]),
 });

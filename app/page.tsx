@@ -50,6 +50,319 @@ function ToolAvailabilityView({ toolId }: { toolId: Id<"tools"> }) {
   );
 }
 
+function AdminConsole() {
+  const [activeTab, setActiveTab] = useState<"loans" | "tools" | "lenders" | "audit">("loans");
+  const [loanStatusFilter, setLoanStatusFilter] = useState<"all" | "active" | "returned">("all");
+  const [adminActionMsg, setAdminActionMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const allLoans = useQuery(
+    api.admin.listAllLoans,
+    loanStatusFilter === "all" ? {} : { status: loanStatusFilter }
+  );
+  const allTools = useQuery(api.tools.listAll, {});
+  const lenders = useQuery(api.admin.listLenders, {});
+  const auditLogs = useQuery(api.admin.listAuditLogs, { limit: 25 });
+
+  const removeListing = useMutation(api.admin.removeListing);
+  const setTrustedLender = useMutation(api.admin.setTrustedLender);
+
+  const handleAdminRemoveTool = async (toolId: Id<"tools">, toolName: string) => {
+    if (!confirm(`ADMIN ACTION: Soft-remove "${toolName}"? Active loans and loan history will remain intact.`)) {
+      return;
+    }
+
+    try {
+      const res = await removeListing({ toolId });
+      setAdminActionMsg({
+        type: "success",
+        text: res.alreadyRemoved
+          ? `"${toolName}" was already removed.`
+          : `Listing "${toolName}" successfully removed by admin.`,
+      });
+      setTimeout(() => setAdminActionMsg(null), 4000);
+    } catch (err: unknown) {
+      setAdminActionMsg({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to remove listing",
+      });
+    }
+  };
+
+  const handleToggleTrusted = async (userId: Id<"users">, displayName: string, currentTrusted: boolean) => {
+    try {
+      await setTrustedLender({ userId, isTrusted: !currentTrusted });
+      setAdminActionMsg({
+        type: "success",
+        text: `Trusted lender status for ${displayName} ${!currentTrusted ? "granted" : "revoked"}.`,
+      });
+      setTimeout(() => setAdminActionMsg(null), 4000);
+    } catch (err: unknown) {
+      setAdminActionMsg({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to update trusted lender status",
+      });
+    }
+  };
+
+  return (
+    <section className="rounded-lg border-2 border-purple-500 bg-purple-50/40 p-6 shadow-sm space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-purple-200 pb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-bold text-purple-950">Administrator Console</h2>
+            <span className="rounded bg-purple-700 px-2.5 py-0.5 text-xs font-semibold text-white">
+              ADMIN
+            </span>
+          </div>
+          <p className="text-xs text-purple-800 mt-1">
+            Authorized oversight, platform-wide loan tracking, listing control, and audit logs.
+          </p>
+        </div>
+
+        {/* Tab Controls */}
+        <div className="flex flex-wrap gap-1">
+          <button
+            onClick={() => setActiveTab("loans")}
+            className={`rounded px-3 py-1 text-xs font-semibold ${
+              activeTab === "loans"
+                ? "bg-purple-700 text-white"
+                : "bg-white text-purple-900 border border-purple-200 hover:bg-purple-100"
+            }`}
+          >
+            All Loans ({allLoans?.length ?? "..."})
+          </button>
+          <button
+            onClick={() => setActiveTab("tools")}
+            className={`rounded px-3 py-1 text-xs font-semibold ${
+              activeTab === "tools"
+                ? "bg-purple-700 text-white"
+                : "bg-white text-purple-900 border border-purple-200 hover:bg-purple-100"
+            }`}
+          >
+            Listings ({allTools?.length ?? "..."})
+          </button>
+          <button
+            onClick={() => setActiveTab("lenders")}
+            className={`rounded px-3 py-1 text-xs font-semibold ${
+              activeTab === "lenders"
+                ? "bg-purple-700 text-white"
+                : "bg-white text-purple-900 border border-purple-200 hover:bg-purple-100"
+            }`}
+          >
+            Lenders ({lenders?.length ?? "..."})
+          </button>
+          <button
+            onClick={() => setActiveTab("audit")}
+            className={`rounded px-3 py-1 text-xs font-semibold ${
+              activeTab === "audit"
+                ? "bg-purple-700 text-white"
+                : "bg-white text-purple-900 border border-purple-200 hover:bg-purple-100"
+            }`}
+          >
+            Audit Logs ({auditLogs?.length ?? "..."})
+          </button>
+        </div>
+      </div>
+
+      {adminActionMsg && (
+        <div
+          className={`rounded p-3 text-xs font-medium border ${
+            adminActionMsg.type === "success"
+              ? "bg-green-100 text-green-800 border-green-300"
+              : "bg-red-100 text-red-800 border-red-300"
+          }`}
+        >
+          {adminActionMsg.text}
+        </div>
+      )}
+
+      {/* Tab: All Loans */}
+      {activeTab === "loans" && (
+        <div className="space-y-3 bg-white p-4 rounded border border-purple-200">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-gray-900">Platform Loans</h3>
+            <div className="flex gap-1">
+              {(["all", "active", "returned"] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setLoanStatusFilter(s)}
+                  className={`rounded px-2.5 py-0.5 text-xs font-medium capitalize ${
+                    loanStatusFilter === s
+                      ? "bg-gray-900 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {allLoans === undefined ? (
+            <p className="text-xs text-gray-500">Loading loans...</p>
+          ) : allLoans.length === 0 ? (
+            <p className="text-xs text-gray-500">No loans found matching filter.</p>
+          ) : (
+            <div className="divide-y text-xs">
+              {allLoans.map((loan) => (
+                <div key={loan._id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <span className="font-semibold text-gray-900">{loan.toolName}</span>{" "}
+                    <span className="text-gray-500">({loan.toolCategory})</span>
+                    <p className="text-gray-600 mt-0.5">
+                      Lender: <span className="font-medium text-gray-800">{loan.lenderDisplayName}</span> | Borrower:{" "}
+                      <span className="font-medium text-gray-800">{loan.borrowerDisplayName}</span>
+                    </p>
+                    <p className="text-gray-500">
+                      Dates: {loan.startDate} to {loan.dueDate}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {loan.status === "active" ? (
+                      loan.isOverdue ? (
+                        <span className="rounded bg-red-100 text-red-800 px-2 py-0.5 font-semibold">
+                          OVERDUE
+                        </span>
+                      ) : (
+                        <span className="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5 font-semibold">
+                          ACTIVE
+                        </span>
+                      )
+                    ) : (
+                      <span className="rounded bg-gray-100 text-gray-700 px-2 py-0.5 font-semibold">
+                        RETURNED
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Tool Listings */}
+      {activeTab === "tools" && (
+        <div className="space-y-3 bg-white p-4 rounded border border-purple-200">
+          <h3 className="text-sm font-bold text-gray-900">Active Listings Management</h3>
+          <p className="text-xs text-gray-500">
+            Admins may soft-remove inappropriate listings. Historical loans and pending requests stay preserved.
+          </p>
+
+          {allTools === undefined ? (
+            <p className="text-xs text-gray-500">Loading listings...</p>
+          ) : allTools.length === 0 ? (
+            <p className="text-xs text-gray-500">No active listings found.</p>
+          ) : (
+            <div className="divide-y text-xs">
+              {allTools.map((t) => (
+                <div key={t._id} className="py-2.5 flex items-center justify-between gap-2">
+                  <div>
+                    <span className="font-semibold text-gray-900">{t.name}</span>{" "}
+                    <span className="text-gray-500">({t.category})</span>
+                    <p className="text-gray-500">{t.description || "No description provided."}</p>
+                  </div>
+                  <div>
+                    <button
+                      onClick={() => handleAdminRemoveTool(t._id, t.name)}
+                      className="rounded border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-100"
+                    >
+                      Admin Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Trusted Lenders */}
+      {activeTab === "lenders" && (
+        <div className="space-y-3 bg-white p-4 rounded border border-purple-200">
+          <h3 className="text-sm font-bold text-gray-900">Lenders &amp; Trusted Status</h3>
+          <p className="text-xs text-gray-500">
+            Designate vetted community members as Trusted Lenders without altering their base account roles.
+          </p>
+
+          {lenders === undefined ? (
+            <p className="text-xs text-gray-500">Loading users...</p>
+          ) : lenders.length === 0 ? (
+            <p className="text-xs text-gray-500">No registered users found.</p>
+          ) : (
+            <div className="divide-y text-xs">
+              {lenders.map((u) => (
+                <div key={u._id} className="py-2.5 flex items-center justify-between gap-2">
+                  <div>
+                    <span className="font-semibold text-gray-900">{u.displayName}</span>{" "}
+                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
+                      {u.role}
+                    </span>
+                    <p className="text-gray-500 mt-0.5">
+                      Trusted Status:{" "}
+                      <span className={u.isTrustedLender ? "font-semibold text-green-700" : "text-gray-500"}>
+                        {u.isTrustedLender ? "Trusted Lender ✓" : "Standard"}
+                      </span>
+                    </p>
+                  </div>
+
+                  <div>
+                    <button
+                      onClick={() => handleToggleTrusted(u._id, u.displayName, u.isTrustedLender)}
+                      className={`rounded px-2.5 py-1 text-xs font-semibold ${
+                        u.isTrustedLender
+                          ? "border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                          : "border border-green-300 bg-green-50 text-green-800 hover:bg-green-100"
+                      }`}
+                    >
+                      {u.isTrustedLender ? "Revoke Trusted" : "Grant Trusted"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Audit Logs */}
+      {activeTab === "audit" && (
+        <div className="space-y-3 bg-white p-4 rounded border border-purple-200">
+          <h3 className="text-sm font-bold text-gray-900">System Audit Trail</h3>
+          <p className="text-xs text-gray-500">
+            Immutable, transactional log of security-sensitive operations across tools, requests, loans, and admin actions.
+          </p>
+
+          {auditLogs === undefined ? (
+            <p className="text-xs text-gray-500">Loading audit trail...</p>
+          ) : auditLogs.length === 0 ? (
+            <p className="text-xs text-gray-500">No audit records logged yet.</p>
+          ) : (
+            <div className="divide-y text-xs">
+              {auditLogs.map((log) => (
+                <div key={log._id} className="py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                  <div>
+                    <span className="font-mono text-purple-700 font-semibold">{log.action}</span>{" "}
+                    <span className="text-gray-500">on</span>{" "}
+                    <span className="font-mono text-gray-800">{log.targetType}:{log.targetId.slice(-8)}</span>
+                    <p className="text-[11px] text-gray-500">
+                      Actor: <span className="font-medium text-gray-700">{log.actorDisplayName}</span>
+                    </p>
+                  </div>
+                  <div className="text-[11px] text-gray-400">
+                    {new Date(log.timestamp).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function UserProfileAndTools() {
   const identity = useQuery(api.authTest.getMyIdentity, {});
   const me = useQuery(api.users.getMe, {});
@@ -293,13 +606,23 @@ function UserProfileAndTools() {
           </p>
           <p>
             <span className="font-semibold">Role:</span>{" "}
-            <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-medium">
-              {me?.role ?? "..."}
+            <span
+              className={`rounded px-2 py-0.5 text-xs font-semibold ${
+                me?.role === "admin"
+                  ? "bg-purple-100 text-purple-800"
+                  : "bg-gray-100 text-gray-800"
+              }`}
+            >
+              {me?.role?.toUpperCase() ?? "..."}
             </span>
           </p>
           <p>
             <span className="font-semibold">Trusted Lender:</span>{" "}
-            {me?.isTrustedLender ? "Yes" : "No"}
+            {me?.isTrustedLender ? (
+              <span className="text-green-700 font-medium">Yes ✓</span>
+            ) : (
+              "No"
+            )}
           </p>
           <p>
             <span className="font-semibold">Clerk Subject:</span>{" "}
@@ -307,6 +630,9 @@ function UserProfileAndTools() {
           </p>
         </div>
       </section>
+
+      {/* Admin Section (Conditional on authoritative Convex admin role) */}
+      {me?.role === "admin" && <AdminConsole />}
 
       {/* Browse Tools to Borrow Section */}
       <section className="rounded-lg border bg-white p-6 shadow-sm">
@@ -486,7 +812,7 @@ function UserProfileAndTools() {
         )}
       </section>
 
-      {/* Incoming Requests Section (Phase 3.3 Approval Workflow) */}
+      {/* Incoming Requests Section */}
       <section className="rounded-lg border bg-white p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-2">Incoming Requests ({incomingRequests?.length ?? 0})</h2>
         <p className="text-xs text-gray-500 mb-4">
@@ -562,7 +888,7 @@ function UserProfileAndTools() {
         )}
       </section>
 
-      {/* My Loans Section (Phase 3.3) */}
+      {/* My Loans Section */}
       <section className="rounded-lg border bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-xl font-bold">My Loans ({myLoans?.length ?? 0})</h2>

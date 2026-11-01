@@ -12,6 +12,7 @@ import {
   validateDescription,
   validateToolName,
 } from "./lib/validation";
+import { logAuditEvent } from "./lib/audit";
 import type {
   ToolCategory,
   ToolCondition,
@@ -178,6 +179,14 @@ export const create = mutation({
       updatedAt: Date.now(),
     });
 
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "tool.create",
+      targetType: "tools",
+      targetId: toolId,
+      metadata: { name, category },
+    });
+
     return toolId;
   },
 });
@@ -198,7 +207,7 @@ export const update = mutation({
       throw new Error("Tool ID is required");
     }
 
-    const { tool } = await requireToolOwner(ctx, targetId);
+    const { user, tool } = await requireToolOwner(ctx, targetId);
 
     if (tool.status === "removed") {
       throw new Error("Cannot edit a removed tool listing");
@@ -243,6 +252,13 @@ export const update = mutation({
 
     await ctx.db.patch(targetId, patch);
 
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "tool.update",
+      targetType: "tools",
+      targetId: targetId,
+    });
+
     return await ctx.db.get(targetId);
   },
 });
@@ -258,7 +274,7 @@ export const removeMine = mutation({
       throw new Error("Tool ID is required");
     }
 
-    const { tool } = await requireToolOwner(ctx, targetId);
+    const { user, tool } = await requireToolOwner(ctx, targetId);
 
     if (tool.status === "removed") {
       throw new Error("Listing is already removed");
@@ -267,6 +283,13 @@ export const removeMine = mutation({
     await ctx.db.patch(targetId, {
       status: "removed",
       updatedAt: Date.now(),
+    });
+
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "tool.remove",
+      targetType: "tools",
+      targetId: targetId,
     });
 
     return { success: true, id: targetId };

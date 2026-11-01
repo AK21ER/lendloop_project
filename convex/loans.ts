@@ -5,6 +5,7 @@ import {
   resolveAuthenticatedUser,
 } from "./lib/auth";
 import { isLoanOverdue } from "./lib/validation";
+import { logAuditEvent } from "./lib/audit";
 
 /**
  * Returns all loans where the authenticated user is the borrower or lender.
@@ -181,6 +182,14 @@ export const markReturned = mutation({
     await ctx.db.patch(loan._id, {
       status: "returned",
       returnedAt: now,
+    });
+
+    await logAuditEvent(ctx, {
+      actorId: user._id,
+      action: "loan.return",
+      targetType: "loans",
+      targetId: loan._id,
+      metadata: { toolId: loan.toolId },
     });
 
     return {

@@ -12,6 +12,7 @@ import * as usersModule from "../convex/users";
 import * as toolsModule from "../convex/tools";
 import * as requestsModule from "../convex/requests";
 import * as loansModule from "../convex/loans";
+import * as adminModule from "../convex/admin";
 import * as authTestModule from "../convex/authTest";
 import { requireAdmin, requireToolOwner } from "../convex/lib/permissions";
 import { requireAuthenticatedUser } from "../convex/lib/auth";
@@ -935,7 +936,6 @@ describe("LendLoop Phase 3.2: Borrow Request Backend", () => {
   });
 });
 
-describe("LendLoop Phase 3.3: Approval, Loan Creation & Returns", () => {
   // Setup helper for lender, borrower, and active tool
   async function setupLenderBorrowerAndRequest(db: MockConvexDb) {
     const lenderCtx = createMockContext(db, {
@@ -972,6 +972,8 @@ describe("LendLoop Phase 3.3: Approval, Loan Creation & Returns", () => {
 
     return { lenderCtx, lender, borrowerCtx, borrower, toolId, requestId, startDate, endDate };
   }
+
+describe("LendLoop Phase 3.3: Approval, Loan Creation & Returns", () => {
 
   // 1. Lender approves a pending request
   it("Requirement 1: Lender approves a pending request and creates a loan", async () => {
@@ -1501,5 +1503,419 @@ describe("LendLoop Phase 3.3: Approval, Loan Creation & Returns", () => {
     assert.equal(afterAvail[0].dueDate, getOffsetDate(5));
   });
 });
+
+describe("LendLoop Phase 3.4: Admin Features, Audit Logs & Backend Hardening", () => {
+  async function setupAdmin(db: MockConvexDb, name = "Platform Admin") {
+    const adminCtx = createMockContext(db, {
+      subject: `clerk_admin_${name.replace(/\s+/g, "_")}`,
+      name,
+    });
+    const userRes = (await callMutation(usersModule.ensureCurrentUser, adminCtx, {})) as {
+      _id: string;
+      role: string;
+    };
+    await db.patch(userRes._id, { role: "admin" });
+    return { adminCtx, adminUserId: userRes._id };
+  }
+
+  // 1. Normal user cannot access admin functions
+  it("Requirement 1: Normal user cannot access admin functions", async () => {
+    const db = new MockConvexDb();
+    const normalCtx = createMockContext(db, { subject: "clerk_normal_1", name: "Normal User" });
+    await callMutation(usersModule.ensureCurrentUser, normalCtx, {});
+
+    // listAllLoans rejected
+    await assert.rejects(
+      async () => {
+        await callQuery(adminModule.listAllLoans, normalCtx, {});
+      },
+      /Forbidden: Administrator privileges required/
+    );
+
+    // listLenders rejected
+    await assert.rejects(
+      async () => {
+        await callQuery(adminModule.listLenders, normalCtx, {});
+      },
+      /Forbidden: Administrator privileges required/
+    );
+
+    // listAuditLogs rejected
+    await assert.rejects(
+      async () => {
+        await callQuery(adminModule.listAuditLogs, normalCtx, {});
+      },
+      /Forbidden: Administrator privileges required/
+    );
+
+    // setTrustedLender rejected
+    await assert.rejects(
+      async () => {
+        await callMutation(adminModule.setTrustedLender, normalCtx, {
+          userId: "users_1" as unknown as Id<"users">,
+          isTrusted: true,
+        });
+      },
+      /Forbidden: Administrator privileges required/
+    );
+
+    // removeListing rejected
+    await assert.rejects(
+      async () => {
+        await callMutation(adminModule.removeListing, normalCtx, {
+          toolId: "tools_1" as unknown as Id<"tools">,
+        });
+      },
+      /Forbidden: Administrator privileges required/
+    );
+  });
+
+  // 2. Admin can view all loans
+  it("Requirement 2: Admin can view all loans with tool, borrower, and lender info", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+    const { adminCtx } = await setupAdmin(db);
+
+    // Approve loan
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    const allLoans = (await callQuery(adminModule.listAllLoans, adminCtx, {})) as Array<{
+      toolName: string;
+      borrowerDisplayName: string;
+      lenderDisplayName: string;
+      status: string;
+      isOverdue: boolean;
+    }>;
+
+    assert.equal(allLoans.length, 1);
+    assert.equal(allLoans[0].toolName, "Table Saw");
+    assert.equal(allLoans[0].borrowerDisplayName, "Bella Borrower");
+    assert.equal(allLoans[0].lenderDisplayName, "Leo Lender");
+    assert.equal(allLoans[0].status, "active");
+    assert.equal(typeof allLoans[0].isOverdue, "boolean");
+
+    // Status filtering works
+    const activeLoans = (await callQuery(adminModule.listAllLoans, adminCtx, {
+      status: "active",
+    })) as Array<unknown>;
+    assert.equal(activeLoans.length, 1);
+
+    const returnedLoans = (await callQuery(adminModule.listAllLoans, adminCtx, {
+      status: "returned",
+    })) as Array<unknown>;
+    assert.equal(returnedLoans.length, 0);
+  });
+
+  // 3. Admin can remove another user's listing
+  it("Requirement 3: Admin can soft-remove another user's listing", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderBorrowerAndRequest(db);
+    const { adminCtx } = await setupAdmin(db);
+
+    const removeRes = (await callMutation(adminModule.removeListing, adminCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    })) as { success: boolean; alreadyRemoved: boolean };
+
+    assert.equal(removeRes.success, true);
+    assert.equal(removeRes.alreadyRemoved, false);
+
+    const tool = await db.get(toolId);
+    assert.equal(tool?.status, "removed");
+  });
+
+  // 4. Admin removal preserves active loan records
+  it("Requirement 4: Admin listing removal preserves approved active loan records", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId, requestId } = await setupLenderBorrowerAndRequest(db);
+    const { adminCtx } = await setupAdmin(db);
+
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Admin soft-removes the listing
+    await callMutation(adminModule.removeListing, adminCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    });
+
+    // Active loan is preserved in database
+    const loan = await db.get(approveRes.loanId);
+    assert.ok(loan);
+    assert.equal(loan.status, "active");
+
+    // Lender can still mark it returned
+    const returnRes = (await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    })) as { success: boolean };
+    assert.equal(returnRes.success, true);
+  });
+
+  // 5. Admin can set/unset trusted status without altering role
+  it("Requirement 5: Admin can set and unset trusted lender status without altering role", async () => {
+    const db = new MockConvexDb();
+    const userCtx = createMockContext(db, { subject: "clerk_target_user", name: "Target Neighbor" });
+    const userRes = (await callMutation(usersModule.ensureCurrentUser, userCtx, {})) as {
+      _id: string;
+      role: string;
+      isTrustedLender: boolean;
+    };
+    const targetUserId = userRes._id;
+
+    assert.equal(userRes.isTrustedLender, false);
+    assert.equal(userRes.role, "user");
+
+    const { adminCtx } = await setupAdmin(db);
+
+    // Promote to trusted lender
+    const res1 = (await callMutation(adminModule.setTrustedLender, adminCtx, {
+      userId: targetUserId as unknown as Id<"users">,
+      isTrusted: true,
+    })) as { success: boolean; changed: boolean; isTrustedLender: boolean };
+
+    assert.equal(res1.success, true);
+    assert.equal(res1.changed, true);
+    assert.equal(res1.isTrustedLender, true);
+
+    // Verify user role is NOT changed
+    const userAfter1 = await db.get(targetUserId);
+    assert.equal(userAfter1?.isTrustedLender, true);
+    assert.equal(userAfter1?.role, "user");
+
+    // Repeated call is safe and idempotent
+    const resDuplicate = (await callMutation(adminModule.setTrustedLender, adminCtx, {
+      userId: targetUserId as unknown as Id<"users">,
+      isTrusted: true,
+    })) as { success: boolean; changed: boolean };
+    assert.equal(resDuplicate.changed, false);
+
+    // Unset trusted lender
+    const res2 = (await callMutation(adminModule.setTrustedLender, adminCtx, {
+      userId: targetUserId as unknown as Id<"users">,
+      isTrusted: false,
+    })) as { success: boolean; changed: boolean; isTrustedLender: boolean };
+    assert.equal(res2.isTrustedLender, false);
+
+    const userAfter2 = await db.get(targetUserId);
+    assert.equal(userAfter2?.isTrustedLender, false);
+    assert.equal(userAfter2?.role, "user");
+  });
+
+  // 6. User cannot change their own role or trusted flag
+  it("Requirement 6: User cannot change their own role or trusted flag", async () => {
+    const db = new MockConvexDb();
+    const userCtx = createMockContext(db, { subject: "clerk_sneaky", name: "Sneaky User" });
+    await callMutation(usersModule.ensureCurrentUser, userCtx, {});
+
+    // Calling ensureCurrentUser repeatedly preserves role and trusted flag
+    const secondCall = (await callMutation(usersModule.ensureCurrentUser, userCtx, {
+      role: "admin",
+      isTrustedLender: true,
+    })) as { role: string; isTrustedLender: boolean };
+
+    assert.equal(secondCall.role, "user");
+    assert.equal(secondCall.isTrustedLender, false);
+  });
+
+  // 7. Unauthorized caller cannot exploit duplicate approval to obtain another user's loan ID
+  it("Requirement 7: Unauthorized caller cannot exploit duplicate approval to obtain another user's loan ID", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, borrowerCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    // Lender approves the request
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string; alreadyApproved: boolean };
+    assert.ok(approveRes.loanId);
+
+    // Borrower calls approve on already approved request -> must be rejected with authorization error
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, borrowerCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      /Borrower cannot approve their own request/
+    );
+
+    // Unrelated third-party user calls approve on already approved request -> rejected with forbidden error
+    const thirdPartyCtx = createMockContext(db, { subject: "clerk_stranger", name: "Stranger" });
+    await callMutation(usersModule.ensureCurrentUser, thirdPartyCtx, {});
+
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, thirdPartyCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      /Forbidden: Only the tool owner can approve this request/
+    );
+
+    // Safe repeated call by the actual verified lender succeeds and returns loanId
+    const repeatApprove = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string; alreadyApproved: boolean };
+    assert.equal(repeatApprove.loanId, approveRes.loanId);
+    assert.equal(repeatApprove.alreadyApproved, true);
+  });
+
+  // 8. Audit events are created for significant changes
+  it("Requirement 8: Audit events are created for significant mutations", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, toolId, requestId } = await setupLenderBorrowerAndRequest(db);
+    const { adminCtx } = await setupAdmin(db);
+
+    // Check audit logs table
+    const auditLogsBefore = await db.query("auditLogs").collect();
+    // Should have: tool.create, request.create
+    const actionsBefore = auditLogsBefore.map((l) => l.action);
+    assert.ok(actionsBefore.includes("tool.create"));
+    assert.ok(actionsBefore.includes("request.create"));
+
+    // Approve request
+    const approveRes = (await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    })) as { loanId: string };
+
+    // Return loan
+    await callMutation(loansModule.markReturned, lenderCtx, {
+      loanId: approveRes.loanId as unknown as Id<"loans">,
+    });
+
+    // Admin removes listing
+    await callMutation(adminModule.removeListing, adminCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    });
+
+    const allAuditLogs = await db.query("auditLogs").collect();
+    const allActions = allAuditLogs.map((l) => l.action);
+
+    assert.ok(allActions.includes("tool.create"));
+    assert.ok(allActions.includes("request.create"));
+    assert.ok(allActions.includes("request.approve"));
+    assert.ok(allActions.includes("loan.return"));
+    assert.ok(allActions.includes("admin.tool.remove"));
+
+    // Admin can query audit logs
+    const queriedLogs = (await callQuery(adminModule.listAuditLogs, adminCtx, {})) as Array<{
+      action: string;
+      actorDisplayName: string;
+    }>;
+    assert.ok(queriedLogs.length >= 5);
+  });
+
+  // 9. Audit logs do not contain secrets
+  it("Requirement 9: Audit logs do not contain secrets or sensitive tokens", async () => {
+    const db = new MockConvexDb();
+    const { lenderCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    await callMutation(requestsModule.approve, lenderCtx, {
+      requestId: requestId as unknown as Id<"borrowRequests">,
+    });
+
+    const allAuditLogs = await db.query("auditLogs").collect();
+    for (const log of allAuditLogs) {
+      const serialized = JSON.stringify(log);
+      assert.equal(serialized.includes("clerk_secret"), false);
+      assert.equal(serialized.includes("token_"), false);
+      assert.equal(serialized.includes("password"), false);
+    }
+  });
+
+  // 10. Failed mutations do not leave partial audit records
+  it("Requirement 10: Failed mutations do not leave partial audit records", async () => {
+    const db = new MockConvexDb();
+    const { borrowerCtx, requestId } = await setupLenderBorrowerAndRequest(db);
+
+    const logsCountBefore = (await db.query("auditLogs").collect()).length;
+
+    // Malicious borrower tries to approve -> throws error
+    await assert.rejects(
+      async () => {
+        await callMutation(requestsModule.approve, borrowerCtx, {
+          requestId: requestId as unknown as Id<"borrowRequests">,
+        });
+      },
+      /Borrower cannot approve their own request/
+    );
+
+    // No new audit log record should have been committed for the failed approval
+    const logsAfter = await db.query("auditLogs").collect();
+    assert.equal(logsAfter.length, logsCountBefore);
+    assert.equal(logsAfter.some((l) => l.action === "request.approve"), false);
+  });
+
+  // 11. Duplicate admin operations remain safe
+  it("Requirement 11: Duplicate admin operations remain safe and idempotent", async () => {
+    const db = new MockConvexDb();
+    const { toolId } = await setupLenderBorrowerAndRequest(db);
+    const { adminCtx } = await setupAdmin(db);
+
+    // First removal
+    const res1 = (await callMutation(adminModule.removeListing, adminCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    })) as { success: boolean; alreadyRemoved: boolean };
+    assert.equal(res1.alreadyRemoved, false);
+
+    // Second removal
+    const res2 = (await callMutation(adminModule.removeListing, adminCtx, {
+      toolId: toolId as unknown as Id<"tools">,
+    })) as { success: boolean; alreadyRemoved: boolean };
+    assert.equal(res2.alreadyRemoved, true);
+  });
+
+  // 12. Security: Elimination of browser-callable admin provisioning & operator-only internal provisioning
+  it("Requirement 12: No public function exposes admin provisioning and fresh deployment cannot be claimed by arbitrary users", async () => {
+    const db = new MockConvexDb();
+
+    // 1. Verify no public admin provisioning function is exported
+    assert.equal(
+      (adminModule as Record<string, unknown>).provisionInitialAdmin,
+      undefined,
+      "public provisionInitialAdmin must not exist"
+    );
+
+    // 2. On a fresh deployment with 0 admins, ordinary user cannot claim admin
+    const user1Ctx = createMockContext(db, { subject: "clerk_u1_fresh", name: "First User" });
+    const user1 = (await callMutation(usersModule.ensureCurrentUser, user1Ctx, {
+      role: "admin", // Malicious payload attempted
+    })) as { _id: string; role: string };
+
+    assert.equal(user1.role, "user", "First user on fresh deployment must remain 'user'");
+
+    // 3. Operator executes controlled internal provisioning (simulating CLI: npx convex run admin:provisionAdminInternal)
+    const operatorCtx = createMockContext(db, null); // Internal/CLI execution context
+    const cliRes = (await callMutation(adminModule.provisionAdminInternal, operatorCtx, {
+      clerkId: "clerk_u1_fresh",
+    })) as { success: boolean; alreadyAdmin: boolean; role: string; userId: string };
+
+    assert.equal(cliRes.success, true);
+    assert.equal(cliRes.alreadyAdmin, false);
+    assert.equal(cliRes.role, "admin");
+
+    const u1Db = await db.get(user1._id);
+    assert.equal(u1Db?.role, "admin");
+
+    // 4. Repeated operator call is safe and idempotent
+    const repeatRes = (await callMutation(adminModule.provisionAdminInternal, operatorCtx, {
+      userId: user1._id as unknown as Id<"users">,
+    })) as { success: boolean; alreadyAdmin: boolean; role: string };
+    assert.equal(repeatRes.alreadyAdmin, true);
+    assert.equal(repeatRes.role, "admin");
+
+    // 5. Audit log recorded without secrets
+    const auditLogs = await db.query("auditLogs").collect();
+    const provisionLog = auditLogs.find((l) => l.action === "admin.provisioned");
+    assert.ok(provisionLog);
+    assert.equal(provisionLog.targetId, user1._id);
+    assert.deepEqual(provisionLog.metadata, { method: "operator_internal" });
+
+    // 6. Provisioned admin can immediately access administrative functions
+    const adminLoans = (await callQuery(adminModule.listAllLoans, user1Ctx, {})) as Array<unknown>;
+    assert.ok(Array.isArray(adminLoans));
+  });
+});
+
 
 
