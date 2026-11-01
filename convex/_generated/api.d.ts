@@ -9,6 +9,12 @@
  */
 
 import type * as authTest from "../authTest.js";
+import type * as constants from "../constants.js";
+import type * as lib_auth from "../lib/auth.js";
+import type * as lib_permissions from "../lib/permissions.js";
+import type * as lib_validation from "../lib/validation.js";
+import type * as tools from "../tools.js";
+import type * as users from "../users.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +24,12 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   authTest: typeof authTest;
+  constants: typeof constants;
+  "lib/auth": typeof lib_auth;
+  "lib/permissions": typeof lib_permissions;
+  "lib/validation": typeof lib_validation;
+  tools: typeof tools;
+  users: typeof users;
 }>;
 
 /**
